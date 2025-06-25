@@ -1,19 +1,22 @@
+import os
+import time
+import threading
+import pyautogui
+import requests
+from datetime import timedelta
+from django.utils import timezone
 from django.shortcuts import render, redirect
 from .models import Employee, TimeLog
 from django.views.decorators.cache import never_cache
-from django.utils import timezone
-from datetime import timedelta
 from django.utils.dateparse import parse_duration
-import threading
-import os
-import pyautogui
-import time
 
-# Global dictionary to manage screenshot threads
+# Manage running screenshot threads
 screenshot_threads = {}
 
-# Function to take periodic screenshots
+# API URL to send screenshots
+API_URL = "https://kalathiyainfotechapi.in/api/screenshots"
 
+# Function to capture and send screenshots
 def take_screenshots(session_id, employee_name):
     while screenshot_threads.get(session_id, {}).get("running"):
         if screenshot_threads[session_id].get("paused"):
@@ -27,14 +30,33 @@ def take_screenshots(session_id, employee_name):
         os.makedirs(folder, exist_ok=True)
         path = os.path.join(folder, f"{time_str}.png")
 
+        # Capture and save screenshot
         screenshot = pyautogui.screenshot()
         screenshot.save(path)
 
-        print(f"Saved screenshot to: {path}")  # Debug/log line
+        print(f"[✓] Saved screenshot: {path}")
 
-        time.sleep(60)  # Take screenshot every 10 seconds
+        # Upload to Laravel API
+        try:
+            with open(path, 'rb') as f:
+                files = {'screenshot': f}
+                data = {
+                    'employee_name': employee_name,
+                    'timestamp': now.strftime("%Y-%m-%d %H:%M:%S")
+                }
+                response = requests.post(API_URL, files=files, data=data)
 
-# Decorator to ensure employee is logged in
+            if response.status_code == 200:
+                print(f"[↑] Screenshot uploaded successfully for {employee_name}")
+            else:
+                print(f"[!] Failed to upload screenshot: {response.status_code} - {response.text}")
+
+        except Exception as e:
+            print(f"[x] Error uploading screenshot: {e}")
+
+        time.sleep(10)  # Take screenshot every 10 seconds
+
+# Login-required decorator
 @never_cache
 def staff_login_required(view_func):
     def wrapper(request, *args, **kwargs):
@@ -43,7 +65,7 @@ def staff_login_required(view_func):
         return view_func(request, *args, **kwargs)
     return wrapper
 
-# Tracker view: handles start/stop and logging
+# Tracker view
 @never_cache
 def tracker(request):
     emp_id = request.session.get('emp_id')
@@ -57,7 +79,7 @@ def tracker(request):
         return redirect('login_view')
 
     today = timezone.now().date()
-    log, created = TimeLog.objects.get_or_create(emp=emp, date=today)
+    log, _ = TimeLog.objects.get_or_create(emp=emp, date=today)
 
     if request.method == "POST":
         action = request.POST.get('action')
@@ -66,33 +88,23 @@ def tracker(request):
             log.start_tracker = timezone.now()
             log.save()
 
-            # Start screenshot thread
+            screenshot_threads[log.id] = {"running": True, "paused": False}
             thread = threading.Thread(
                 target=take_screenshots,
                 args=(log.id, emp.name),
                 daemon=True
             )
-            screenshot_threads[log.id] = {"running": True, "paused": False}
             thread.start()
 
         elif action == "end_tracker":
             if not log.end_tracker:
                 log.end_tracker = timezone.now()
 
-            total_str = request.POST.get("total_time")
-            pause_str = request.POST.get("pause_time")
-            work_str = request.POST.get("work_time")
-
-            if total_str:
-                log.total_time = parse_duration(total_str)
-            if pause_str:
-                log.pause_time = parse_duration(pause_str)
-            if work_str:
-                log.work_time = parse_duration(work_str)
-
+            log.total_time = parse_duration(request.POST.get("total_time") or "0:00:00")
+            log.pause_time = parse_duration(request.POST.get("pause_time") or "0:00:00")
+            log.work_time = parse_duration(request.POST.get("work_time") or "0:00:00")
             log.save()
 
-            # Stop screenshot thread
             if log.id in screenshot_threads:
                 screenshot_threads[log.id]["running"] = False
 
